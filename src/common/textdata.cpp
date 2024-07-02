@@ -23,9 +23,11 @@ QString escapeHtmlSpaces(const QString &str)
 
 bool isPluginFormat(const QString &mime)
 {
-    return mime.startsWith(mimePluginPrefix)
+    return mime.startsWith(mimePrivatePrefix) || (
+        mime.startsWith(mimePluginPrefix)
         && mime.size() > mimePluginPrefix.size()
-        && mime[mimePluginPrefix.size()] != '-';
+        && mime[mimePluginPrefix.size()] != '-'
+    );
 }
 
 } // namespace
@@ -46,7 +48,12 @@ uint hash(const QVariantMap &data)
             continue;
 
         seed = hash(seed, mime);
-        seed = hash(seed, data[mime].toByteArray());
+
+        const auto &value = it.value();
+        if ( value.type() == QVariant::ByteArray )
+            seed = hash(seed, value.toByteArray());
+        else
+            seed = hash(seed, value.toString());
     }
 
     return seed;

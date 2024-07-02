@@ -5,8 +5,10 @@
 
 #include "common/mimetypes.h"
 
+#include <QLockFile>
 #include <QObject>
 #include <QPersistentModelIndex>
+#include <QSet>
 #include <QStringList>
 #include <QTimer>
 #include <QVector>
@@ -18,7 +20,7 @@ struct Ext;
 struct BaseNameExtensions;
 
 #define COPYQ_MIME_PREFIX_ITEMSYNC COPYQ_MIME_PREFIX "itemsync-"
-#define COPYQ_MIME_PREFIX_ITEMSYNC_PRIVATE COPYQ_MIME_PREFIX "itemsync-private-"
+#define COPYQ_MIME_PREFIX_ITEMSYNC_PRIVATE COPYQ_MIME_PRIVATE_PREFIX "itemsync-"
 extern const QLatin1String mimeExtensionMap;
 extern const QLatin1String mimeBaseName;
 extern const QLatin1String mimeNoSave;
@@ -26,7 +28,7 @@ extern const QLatin1String mimeSyncPath;
 extern const QLatin1String mimeNoFormat;
 extern const QLatin1String mimeUnknownFormats;
 
-extern const QLatin1String mimePrivatePrefix;
+extern const QLatin1String mimePrivateSyncPrefix;
 extern const QLatin1String mimeOldBaseName;
 extern const QLatin1String mimeHashPrefix;
 
@@ -124,10 +126,14 @@ private:
             const QDir &dir, const BaseNameExtensions &baseNameWithExts,
             QVariantMap *dataMap, QVariantMap *mimeToExtension);
 
-    bool copyFilesFromUriList(const QByteArray &uriData, int targetRow, const QStringList &baseNames);
+    bool copyFilesFromUriList(const QByteArray &uriData, int targetRow, const QSet<QString> &baseNames);
+
+    void updateMovedRows();
 
     QAbstractItemModel *m_model;
     QTimer m_updateTimer;
+    QTimer m_moveTimer;
+    int m_moveEnd = -1;
     int m_interval = 0;
     const QList<FileFormat> &m_formatSettings;
     QString m_path;
@@ -140,6 +146,8 @@ private:
     BaseNameExtensionsList m_fileList;
     int m_lastBatchIndex = -1;
     int m_itemDataThreshold = -1;
+
+    QLockFile m_lock;
 };
 
 #endif // FILEWATCHER_H

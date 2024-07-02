@@ -6159,9 +6159,11 @@ bool FakeVimHandler::Private::handleExSetCommand(const ExCommand &cmd)
     if (cmd.args.contains('=')) {
         // Non-boolean config to set.
         int p = cmd.args.indexOf('=');
-        QString error = s.trySetValue(cmd.args.left(p), cmd.args.mid(p + 1));
-        if (!error.isEmpty())
+        if ( const QString error = s.trySetValue(cmd.args.left(p), cmd.args.mid(p + 1));
+                !error.isEmpty() )
+        {
             showMessage(MessageError, error);
+        }
     } else {
         QString optionName = cmd.args;
 
@@ -7800,7 +7802,7 @@ void FakeVimHandler::Private::surroundCurrentRange(const Input &input, const QSt
             newBack += "\n";
         else
             newBack = "\n" + newBack;
-    } else if (input.is('(') || input.is('{') || input.is('[') || input.is('[')) {
+    } else if (input.is('(') || input.is('{') || input.is('[')) {
         // Opening characters add an extra space
         newFront = newFront + " ";
         newBack = " " + newBack;

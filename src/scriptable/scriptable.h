@@ -214,6 +214,7 @@ public slots:
     void insert();
     QJSValue remove();
     void edit();
+    QJSValue editItem();
     QJSValue move();
 
     QJSValue read();
@@ -402,7 +403,6 @@ signals:
     void receiveData();
 
 private:
-    void onExecuteOutput(const QByteArray &output);
     void onMonitorClipboardChanged(const QVariantMap &data, ClipboardOwnership ownership);
     void onMonitorClipboardUnchanged(const QVariantMap &data);
     void onSynchronizeSelection(ClipboardMode sourceMode, uint sourceTextHash, uint targetTextHash);
@@ -427,12 +427,13 @@ private:
     QJSValue copy(ClipboardMode mode);
     QJSValue changeItem(bool create);
     void nextToClipboard(int where);
+    void editContent(int editRow, const QString &format, const QByteArray &content, bool changeClipboard);
     QJSValue screenshot(bool select);
     QByteArray serialize(const QJSValue &value);
     QJSValue eval(const QString &script);
     bool runAction(Action *action);
     bool runCommands(CommandType::CommandType type);
-    bool canExecuteCommand(const Command &command);
+    bool canExecuteCommand(const Command &command, QStringList *arguments);
     bool canExecuteCommandFilter(const QString &matchCommand);
     bool verifyClipboardAccess();
     void provideClipboard(ClipboardMode mode);
@@ -480,11 +481,6 @@ private:
     QString m_actionName;
     Abort m_abort = Abort::None;
     int m_skipArguments = 0;
-
-    // FIXME: Parameters for execute() shouldn't be global.
-    QByteArray m_executeStdoutData;
-    QString m_executeStdoutLastLine;
-    QJSValue m_executeStdoutCallback;
 
     bool m_displayFunctionsLock = false;
 

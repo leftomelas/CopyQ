@@ -14,6 +14,7 @@
 #include <QPointer>
 #include <QTimer>
 #include <QVariantMap>
+#include <QVector>
 
 class ItemEditorWidget;
 class ItemFactory;
@@ -121,12 +122,16 @@ class ClipboardBrowser final : public QListView
                 int row = 0 //!< Target row for the new item (negative to append item).
                 );
 
+        bool addReversed(const QVector<QVariantMap> &dataList, int row);
+
         bool addAndSelect(const QVariantMap &data, int row);
 
         /**
          * Add item and remove duplicates.
          */
         void addUnique(const QVariantMap &data, ClipboardMode mode);
+
+        void setItemsData(const QMap<QPersistentModelIndex, QVariantMap> &itemsData);
 
         /** Number of items in list. */
         int length() const { return m.rowCount(); }
@@ -140,9 +145,9 @@ class ClipboardBrowser final : public QListView
         /** Show only items matching the regular expression. */
         void filterItems(const ItemFilterPtr &filter);
         /** Open editor. */
-        bool openEditor(const QByteArray &textData, bool changeClipboard = false);
+        bool openEditor(const QModelIndex &index, const QString &format, const QByteArray &content, bool changeClipboard = false);
         /** Open editor for an item. */
-        bool openEditor(const QModelIndex &index);
+        bool openEditor(const QModelIndex &index, const QString &format);
 
         /** Set current item. */
         void setCurrent(int row, bool keepSelection = false, bool setCurrentOnly = false);
@@ -156,12 +161,10 @@ class ClipboardBrowser final : public QListView
          * Create and edit new item.
          */
         void editNew(
-                const QString &text = QString(), //!< Text of new item.
-                bool changeClipboard = false //!< Change clipboard if item is modified.
-                );
+            const QString &format, const QByteArray &content = {}, bool changeClipboard = false);
 
         /** Edit item in given @a row. */
-        void editRow(int row);
+        void editRow(int row, const QString &format);
 
         void move(int key);
 
@@ -184,8 +187,6 @@ class ClipboardBrowser final : public QListView
          * Return true only if row is filtered and should be hidden.
          */
         bool isFiltered(int row) const;
-
-        QVariantMap itemData(const QModelIndex &index) const;
 
         bool isLoaded() const;
 
@@ -222,7 +223,6 @@ class ClipboardBrowser final : public QListView
         using QListView::verticalOffset;
 
     signals:
-        void itemsAboutToBeRemoved(const QModelIndex &parent, int first, int last);
         void runOnRemoveItemsHandler(const QList<QPersistentModelIndex> &indexes, bool *canRemove);
 
         /** Show list request. */
@@ -329,7 +329,7 @@ class ClipboardBrowser final : public QListView
 
         void setEditorWidget(ItemEditorWidget *editor, bool changeClipboard = false);
 
-        void editItem(const QModelIndex &index, bool editNotes = false, bool changeClipboard = false);
+        void editItem(const QModelIndex &index, const QString &format, bool changeClipboard = false);
 
         void updateEditorGeometry();
 

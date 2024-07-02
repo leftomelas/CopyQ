@@ -212,15 +212,6 @@ QString parseCommandLineArgument(const QString &arg)
     return result;
 }
 
-bool matchData(const QRegularExpression &re, const QVariantMap &data, const QString &format)
-{
-    if ( re.pattern().isEmpty() )
-        return true;
-
-    const QString text = getTextData(data, format);
-    return text.contains(re);
-}
-
 bool isInternalDataFormat(const QString &format)
 {
     return format == mimeWindowTitle
@@ -1025,8 +1016,7 @@ QJSValue Scriptable::removeTab()
     m_skipArguments = 1;
 
     const QString &name = arg(0);
-    const QString error = m_proxy->removeTab(name);
-    if ( !error.isEmpty() )
+    if ( const QString error = m_proxy->removeTab(name); !error.isEmpty() )
         return throwError(error);
     return QJSValue();
 }
@@ -1036,8 +1026,7 @@ QJSValue Scriptable::renameTab()
     m_skipArguments = 2;
     const QString &name = arg(0);
     const QString &newName = arg(1);
-    const QString error = m_proxy->renameTab(newName, name);
-    if ( !error.isEmpty() )
+    if ( const QString error = m_proxy->renameTab(newName, name); !error.isEmpty() )
         return throwError(error);
     return QJSValue();
 }
@@ -1117,8 +1106,7 @@ QJSValue Scriptable::remove()
     if ( rows.empty() )
         rows.append(0);
 
-    const auto error = m_proxy->browserRemoveRows(m_tabName, rows);
-    if ( !error.isEmpty() )
+    if ( const auto error = m_proxy->browserRemoveRows(m_tabName, rows); !error.isEmpty() )
         return throwError(error);
     return QJSValue();
 }
@@ -1140,35 +1128,51 @@ void Scriptable::edit()
 {
     m_skipArguments = -1;
 
-    QJSValue value;
-    QString text;
+    QByteArray content;
     int row = -1;
+    int editRow = -1;
+    bool changeClipboard = true;
 
     const int len = argumentCount();
     for ( int i = 0; i < len; ++i ) {
-        value = argument(i);
+        const QJSValue value = argument(i);
         if (i > 0)
-            text.append(m_inputSeparator);
+            content.append(m_inputSeparator.toUtf8());
         if ( toInt(value, &row) ) {
+            editRow = (i == 0) ? row : -1;
+            changeClipboard = i == 0 && row < 0;
             const QByteArray bytes = row >= 0 ? m_proxy->browserItemData(m_tabName, row, mimeText)
                                               : getClipboardData(mimeText);
-            text.append( getTextData(bytes) );
+            content.append(bytes);
         } else {
-            text.append( toString(value) );
+            content.append( toByteArray(value) );
         }
     }
 
-    bool changeClipboard = row < 0;
+    editContent(editRow, mimeText, content, changeClipboard);
+}
 
-    if ( !m_proxy->browserOpenEditor(m_tabName, fromString(text), changeClipboard) ) {
-        m_proxy->showBrowser(m_tabName);
-        if (len == 1 && row >= 0) {
-            m_proxy->browserSetCurrent(m_tabName, row);
-            m_proxy->browserEditRow(m_tabName, row);
-        } else {
-            m_proxy->browserEditNew(m_tabName, text, changeClipboard);
-        }
-    }
+QJSValue Scriptable::editItem()
+{
+    m_skipArguments = 3;
+
+    int editRow;
+    if ( !toInt(argument(0), &editRow) )
+        return throwError(argumentError());
+
+    const auto format = arg(1, mimeText);
+    const bool changeClipboard = editRow < 0;
+
+    QByteArray content;
+    if ( argumentCount() > 2 )
+        content = makeByteArray(argument(2));
+    else if (editRow >= 0)
+        content = m_proxy->browserItemData(m_tabName, editRow, format);
+    else
+        content = getClipboardData(format);
+
+    editContent(editRow, format, content, changeClipboard);
+    return {};
 }
 
 QJSValue Scriptable::read()
@@ -1767,7 +1771,7 @@ QJSValue Scriptable::selectItems()
 QJSValue Scriptable::selectedTab()
 {
     m_skipArguments = 0;
-    return m_data.value(mimeCurrentTab).toString();
+    return m_proxy->selectedTab();
 }
 
 QJSValue Scriptable::selectedItems()
@@ -1900,9 +1904,9 @@ QJSValue Scriptable::execute()
 {
     m_skipArguments = -1;
 
-    m_executeStdoutData.clear();
-    m_executeStdoutLastLine.clear();
-    m_executeStdoutCallback = QJSValue();
+    QByteArray executeStdoutData;
+    QString executeStdoutLastLine;
+    QJSValue executeStdoutCallback;
 
     // Pass all arguments until null to command. The rest will be sent to stdin.
     QStringList args;
@@ -1913,7 +1917,7 @@ QJSValue Scriptable::execute()
             break;
 
         if ( arg.isCallable() )
-            m_executeStdoutCallback = arg;
+            executeStdoutCallback = arg;
         else
             args.append( toString(arg) );
     }
@@ -1922,7 +1926,7 @@ QJSValue Scriptable::execute()
     for ( ++i ; i < argumentCount(); ++i ) {
         const auto arg = argument(i);
         if ( arg.isCallable() )
-            m_executeStdoutCallback = arg;
+            executeStdoutCallback = arg;
         else
             action.setInput( action.input() + makeByteArray(arg) );
     }
@@ -1931,24 +1935,35 @@ QJSValue Scriptable::execute()
     action.setReadOutput(true);
 
     connect( &action, &Action::actionOutput,
-             this, &Scriptable::onExecuteOutput );
+             this, [&](const QByteArray &output) {
+                 executeStdoutData.append(output);
+             });
+    if ( executeStdoutCallback.isCallable() ) {
+        connect( &action, &Action::actionOutput,
+                 this, [&](const QByteArray &output) {
+                     executeStdoutLastLine.append( getTextData(output) );
+                     auto lines = executeStdoutLastLine.split('\n');
+                     executeStdoutLastLine = lines.takeLast();
+                     if ( !lines.isEmpty() ) {
+                         const auto arg = toScriptValue(lines, m_engine);
+                         call( "executeStdoutCallback", &executeStdoutCallback, {arg} );
+                     }
+                 });
+    }
 
-    if ( !runAction(&action) || action.actionFailed() )
-        return QJSValue();
+    if ( !runAction(&action) || action.actionFailed() ) {
+        return throwError( QStringLiteral("Failed to run command") );
+    }
 
-    if ( m_executeStdoutCallback.isCallable() ) {
-        const auto arg = toScriptValue(m_executeStdoutLastLine, m_engine);
-        call( "executeStdoutCallback", &m_executeStdoutCallback, {arg} );
+    if ( executeStdoutCallback.isCallable() ) {
+        const auto arg = toScriptValue(executeStdoutLastLine, m_engine);
+        call( "executeStdoutCallback", &executeStdoutCallback, {arg} );
     }
 
     QJSValue actionResult = m_engine->newObject();
-    actionResult.setProperty( QStringLiteral("stdout"), newByteArray(m_executeStdoutData) );
+    actionResult.setProperty( QStringLiteral("stdout"), newByteArray(executeStdoutData) );
     actionResult.setProperty( QStringLiteral("stderr"), getTextData(action.errorOutput()) );
     actionResult.setProperty( QStringLiteral("exit_code"), action.exitCode() );
-
-    m_executeStdoutData.clear();
-    m_executeStdoutLastLine.clear();
-    m_executeStdoutCallback = QJSValue();
 
     return actionResult;
 }
@@ -2332,8 +2347,7 @@ QJSValue Scriptable::loadTheme()
     m_skipArguments = 1;
 
     const QString path = getAbsoluteFilePath(arg(0));
-    const QString error = m_proxy->loadTheme(path);
-    if ( !error.isEmpty() )
+    if ( const QString error = m_proxy->loadTheme(path); !error.isEmpty() )
         return throwError(error);
 
     return QJSValue();
@@ -2596,6 +2610,11 @@ void Scriptable::monitorClipboard()
              this, &Scriptable::onSynchronizeSelection );
     connect( &monitor, &ClipboardMonitor::fetchCurrentClipboardOwner,
              this, &Scriptable::onFetchCurrentClipboardOwner );
+    connect( &monitor, &ClipboardMonitor::saveData,
+             m_proxy, [this](const QVariantMap &data) {
+                 m_data = data;
+                 eval("saveData()");
+             } );
 
     monitor.startMonitoring();
     setClipboardMonitorRunning(true);
@@ -2662,21 +2681,6 @@ void Scriptable::collectScriptOverrides()
         overrides.append(ScriptOverrides::OnItemsLoaded);
 
     m_proxy->setScriptOverrides(overrides);
-}
-
-void Scriptable::onExecuteOutput(const QByteArray &output)
-{
-    m_executeStdoutData.append(output);
-
-    if ( m_executeStdoutCallback.isCallable() ) {
-        m_executeStdoutLastLine.append( getTextData(output) );
-        auto lines = m_executeStdoutLastLine.split('\n');
-        m_executeStdoutLastLine = lines.takeLast();
-        if ( !lines.isEmpty() ) {
-            const auto arg = toScriptValue(lines, m_engine);
-            call( "executeStdoutCallback", &m_executeStdoutCallback, {arg} );
-        }
-    }
 }
 
 void Scriptable::onMonitorClipboardChanged(const QVariantMap &data, ClipboardOwnership ownership)
@@ -3050,6 +3054,21 @@ void Scriptable::nextToClipboard(int where)
 #endif
 }
 
+void Scriptable::editContent(
+        int editRow, const QString &format, const QByteArray &content, bool changeClipboard)
+{
+    if ( m_proxy->browserOpenEditor(m_tabName, editRow, format, content, changeClipboard) )
+        return;
+
+    m_proxy->showBrowser(m_tabName);
+    if (editRow >= 0) {
+        m_proxy->browserSetCurrent(m_tabName, editRow);
+        m_proxy->browserEditRow(m_tabName, editRow, format);
+    } else {
+        m_proxy->browserEditNew(m_tabName, format, content, changeClipboard);
+    }
+}
+
 QJSValue Scriptable::screenshot(bool select)
 {
     m_skipArguments = 2;
@@ -3184,12 +3203,13 @@ bool Scriptable::runCommands(CommandType::CommandType type)
         if ( command.outputTab.isEmpty() )
             command.outputTab = tabName;
 
-        if ( !canExecuteCommand(command) )
+        QStringList arguments;
+        if ( !canExecuteCommand(command, &arguments) )
             continue;
 
         if ( canContinue() && !command.cmd.isEmpty() ) {
             Action action;
-            action.setCommand( command.cmd, QStringList(getTextData(m_data)) );
+            action.setCommand(command.cmd, arguments);
             action.setInputWithFormat(m_data, command.input);
             action.setName(command.name);
             action.setData(m_data);
@@ -3228,7 +3248,7 @@ bool Scriptable::runCommands(CommandType::CommandType type)
     return true;
 }
 
-bool Scriptable::canExecuteCommand(const Command &command)
+bool Scriptable::canExecuteCommand(const Command &command, QStringList *arguments)
 {
     // Verify that data for given MIME is available.
     if ( !command.input.isEmpty() ) {
@@ -3241,12 +3261,21 @@ bool Scriptable::canExecuteCommand(const Command &command)
         }
     }
 
+    const QString text = getTextData(m_data);
+    arguments->append(text);
+
     // Verify that and text matches given regexp.
-    if ( !matchData(command.re, m_data, mimeText) )
-        return false;
+    if ( !command.re.pattern().isEmpty() ) {
+        QRegularExpressionMatchIterator it = command.re.globalMatch(text);
+        if ( !it.isValid() || !it.hasNext() )
+            return false;
+
+        while (it.hasNext())
+            arguments->append( it.next().capturedTexts().mid(1) );
+    }
 
     // Verify that window title matches given regexp.
-    if ( !matchData(command.wndre, m_data, mimeWindowTitle) )
+    if ( !command.wndre.pattern().isEmpty() && !getTextData(m_data, mimeWindowTitle).contains(command.wndre) )
         return false;
 
     return canExecuteCommandFilter(command.matchCmd);
@@ -3322,8 +3351,7 @@ void Scriptable::insert(int row, int argumentsBegin, int argumentsEnd)
     m_skipArguments = argumentsEnd;
 
     const VariantMapList items{getItemList(argumentsBegin, argumentsEnd, argumentsArray())};
-    const auto error = m_proxy->browserInsert(m_tabName, row, items);
-    if ( !error.isEmpty() )
+    if ( const auto error = m_proxy->browserInsert(m_tabName, row, items); !error.isEmpty() )
         throwError(error);
 }
 
@@ -3438,8 +3466,9 @@ bool Scriptable::canSynchronizeSelection(ClipboardMode targetMode)
         const QString owner = sourceData.value(mimeOwner).toString();
         if ( owner.isEmpty() && !source.isEmpty() ) {
             const auto sourceTextHash = m_data.value(COPYQ_MIME_PREFIX "source-text-hash").toByteArray().toUInt();
-            if (sourceTextHash != qHash(source)) {
-                COPYQ_LOG(QStringLiteral("Sync: Cancelled - source text changed"));
+            const uint newSourceTextHash = qHash(source);
+            if (sourceTextHash != newSourceTextHash) {
+                COPYQ_LOG("Sync: Cancelled - source text changed");
                 return false;
             }
         }
@@ -3454,8 +3483,9 @@ bool Scriptable::canSynchronizeSelection(ClipboardMode targetMode)
         const QString owner = targetData.value(mimeOwner).toString();
         if ( owner.isEmpty() && !target.isEmpty() ) {
             const auto targetTextHash = m_data.value(COPYQ_MIME_PREFIX "target-text-hash").toByteArray().toUInt();
-            if (targetTextHash != qHash(target)) {
-                COPYQ_LOG(QStringLiteral("Sync: Cancelled - target text changed"));
+            const uint newTargetTextHash = qHash(target);
+            if (targetTextHash != newTargetTextHash) {
+                COPYQ_LOG("Sync: Cancelled - target text changed");
                 return false;
             }
         }
@@ -3463,15 +3493,15 @@ bool Scriptable::canSynchronizeSelection(ClipboardMode targetMode)
         // Stop if the clipboard and selection text is already synchronized
         // or user selected text and copied it to clipboard.
         if (!sourceData.isEmpty() && source == target) {
-            COPYQ_LOG(QStringLiteral("Sync: Cancelled - target text is already same as source"));
+            COPYQ_LOG("Sync: Cancelled - target text is already same as source");
             return false;
         }
     } else {
-        COPYQ_LOG(QStringLiteral("Sync: Failed to fetch target data"));
+        COPYQ_LOG("Sync: Failed to fetch target data");
     }
 
     if (m_abort != Abort::None) {
-        COPYQ_LOG(QStringLiteral("Sync: Aborting"));
+        COPYQ_LOG("Sync: Aborting");
         return false;
     }
 

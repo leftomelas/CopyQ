@@ -94,6 +94,7 @@ private slots:
     void commandHasClipboardFormat();
 
     void commandEdit();
+    void commandEditItem();
 
     void commandGetSetCurrentPath();
 
@@ -219,6 +220,8 @@ private slots:
     void itemDataPathEnvVariable();
 
     void configTabs();
+
+    void selectedItems();
 
     void shortcutCommand();
     void shortcutCommandOverrideEnter();

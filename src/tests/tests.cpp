@@ -37,6 +37,7 @@
 #include <QTest>
 #include <QTimer>
 
+#include <array>
 #include <memory>
 
 #define WITH_TIMEOUT "afterMilliseconds(10000, fail); "
@@ -149,7 +150,7 @@ bool testStderr(const QByteArray &stderrData, TestInterface::ReadStderrFlag flag
     };
     // Ignore exceptions and errors from clients in application log
     // (these are expected in some tests).
-    static const std::vector<QRegularExpression> ignoreList{
+    static const std::array ignoreList{
         regex(R"(CopyQ Note \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] <Client-[^\n]*)"),
 
         plain("Event handler maximum recursion reached"),
@@ -198,6 +199,9 @@ bool testStderr(const QByteArray &stderrData, TestInterface::ReadStderrFlag flag
 
         // KNotification bug
         plain(R"(QtWarning: QLayout: Attempting to add QLayout "" to QWidget "", which already has a layout)"),
+
+        // Warnings from itemsync plugin, not sure what it causes
+        regex(R"(QtWarning: Could not remove our own lock file .* maybe permissions changed meanwhile)"),
     };
     static QHash<QString, bool> ignoreLog;
 
@@ -500,9 +504,11 @@ public:
 
     QByteArray setClipboard(const QByteArray &bytes, const QString &mime, ClipboardMode mode) override
     {
-        const QByteArray error = setClipboard( createDataMap(mime, bytes), mode );
-        if (!error.isEmpty())
+        if ( const QByteArray error = setClipboard(createDataMap(mime, bytes), mode);
+                !error.isEmpty() )
+        {
             return error;
+        }
 
         return verifyClipboard(bytes, mime);
     }
@@ -1300,6 +1306,12 @@ void Tests::commandDialog()
         [&]() { RUN(WITH_TIMEOUT + script, "DEFAULT\n"); },
         [&]() { RUN(Args() << "keys" << "focus::QLineEdit in :QDialog" << "ENTER", ""); }
     );
+
+    RUN(Args() << "keys" << clipboardBrowserId, "");
+    runMultiple(
+        [&]() { RUN(WITH_TIMEOUT "dialog('.title', 'Remove Items', '.label', 'Remove all items?') === true", "true\n"); },
+        [&]() { RUN(Args() << "keys" << "focus::QPushButton in dialog_Remove Items:QDialog" << "ENTER", ""); }
+    );
 }
 
 void Tests::commandDialogCloseOnDisconnect()
@@ -1589,15 +1601,67 @@ void Tests::commandEdit()
 
     RUN("config" << "editor" << "", "\n");
 
-    // Edit new item.
-    RUN("edit", "");
-    RUN("keys" << ":LINE 1" << "F2", "");
-    RUN("read" << "0", "LINE 1");
+    // Edit clipboard and new item.
+    TEST( m_test->setClipboard("TEST") );
+    RUN("edit" << "-1", "");
+    RUN("keys" << "END" << ":LINE 1" << "F2", "");
+    RUN("read" << "0", "TESTLINE 1");
+    WAIT_FOR_CLIPBOARD("TESTLINE 1");
 
     // Edit existing item.
     RUN("edit" << "0", "");
     RUN("keys" << "END" << "ENTER" << ":LINE 2" << "F2", "");
-    RUN("read" << "0", "LINE 1\nLINE 2");
+    RUN("read" << "0", "TESTLINE 1\nLINE 2");
+    WAIT_FOR_CLIPBOARD("TESTLINE 1");
+
+    // Edit clipboard (ignore existing data) and new item.
+    RUN("edit", "");
+    RUN("keys" << "END" << ":LINE 1" << "F2", "");
+    RUN("read" << "0", "LINE 1");
+    WAIT_FOR_CLIPBOARD("LINE 1");
+}
+
+void Tests::commandEditItem()
+{
+    SKIP_ON_ENV("COPYQ_TESTS_SKIP_COMMAND_EDIT");
+
+    RUN("config" << "editor" << "", "\n");
+
+    // Edit clipboard and new item.
+    TEST( m_test->setClipboard("TEST", mimeHtml) );
+    RUN("editItem" << "-1" << mimeHtml, "");
+    RUN("keys" << "END" << ":LINE 1" << "F2", "");
+#ifdef Q_OS_WIN
+#   define FRAG_START "<!--StartFragment-->"
+#   define FRAG_END "<!--EndFragment-->"
+    const auto expected = QByteArrayLiteral(FRAG_START "TEST" FRAG_END "LINE 1");
+#else
+    const auto expected = QByteArrayLiteral("TESTLINE 1");
+#endif
+    RUN("read" << mimeHtml << "0", expected);
+    RUN("read" << "0", "");
+    WAIT_FOR_CLIPBOARD2(expected, mimeHtml);
+    WAIT_FOR_CLIPBOARD("");
+
+    // Edit existing item.
+    RUN("editItem" << "0" << mimeHtml, "");
+    RUN("keys" << "END" << "ENTER" << ":LINE 2" << "F2", "");
+    RUN("read" << mimeHtml << "0", expected + "\nLINE 2");
+    RUN("read" << "0", "");
+    WAIT_FOR_CLIPBOARD2(expected, mimeHtml);
+    WAIT_FOR_CLIPBOARD("");
+
+    // Edit clipboard (ignore existing data) and new item.
+    RUN("editItem" << "-1" << mimeHtml << "TEST", "");
+    RUN("keys" << "END" << ":LINE 1" << "F2", "");
+    RUN("read" << mimeHtml << "0", "TESTLINE 1");
+    RUN("read" << "0", "");
+#ifdef Q_OS_WIN
+    WAIT_FOR_CLIPBOARD2(FRAG_START "TESTLINE 1" FRAG_END, mimeHtml);
+#else
+    WAIT_FOR_CLIPBOARD2("TESTLINE 1", mimeHtml);
+#endif
+    WAIT_FOR_CLIPBOARD("");
 }
 
 void Tests::commandGetSetCurrentPath()
@@ -2291,10 +2355,18 @@ void Tests::classItemSelectionGetCurrent()
 {
     const auto tab1 = testTab(1);
     const Args args = Args("tab") << tab1 << "separator" << ",";
+
+    RUN("ItemSelection().tab", "CLIPBOARD\n");
+    RUN(args << "ItemSelection().tab", tab1 + "\n");
+
+    RUN(args << "ItemSelection().current().tab", "CLIPBOARD\n");
+    RUN(args << "ItemSelection().current().str()", "ItemSelection(tab=\"CLIPBOARD\", rows=[])\n");
     RUN("setCurrentTab" << tab1, "");
+    RUN(args << "ItemSelection().current().tab", tab1 + "\n");
+    RUN(args << "ItemSelection().current().str()", "ItemSelection(tab=\"" + tab1 + "\", rows=[])\n");
 
     RUN(args << "add" << "C" << "B" << "A", "");
-    RUN(args << "ItemSelection().current().str()", "ItemSelection(tab=\"\", rows=[])\n");
+    RUN(args << "ItemSelection().current().str()", "ItemSelection(tab=\"" + tab1 + "\", rows=[0])\n");
 
     RUN("setCommands([{name: 'test', inMenu: true, shortcuts: ['Ctrl+F1'], cmd: 'copyq: add(ItemSelection().current().str())'}])", "");
     RUN("keys" << "CTRL+F1", "");
@@ -2722,6 +2794,7 @@ void Tests::editNotes()
 {
     RUN("add" << "B" << "A", "");
 
+    RUN("config" << "editor" << "", "\n");
     RUN("keys" << "SHIFT+F2" << ":A Note" << "F2", "");
     RUN("read" << mimeText << "0" << mimeItemNotes << "0" << "F2", "A\nA Note");
     RUN("read" << mimeText << "1" << mimeItemNotes << "1" << "F2", "B\n");
@@ -3186,6 +3259,8 @@ void Tests::openAndSavePreferences()
     // Focus and set wrap text option.
     // This behavior could differ on some systems and in other languages.
     RUN("keys" << configurationDialogId << "ALT+1", "");
+    // Wait for any checkbox animation or delay
+    waitFor(1000);
     RUN("keys" << configurationDialogId << "ENTER" << clipboardBrowserId, "");
     WAIT_ON_OUTPUT("config" << "check_clipboard", "true\n");
 }
@@ -3452,6 +3527,46 @@ void Tests::configTabs()
     RUN(QString("config('tabs', ['%1', '%2'])").arg(tab1, tab2), tab1 + sep + tab2 + sep);
     RUN("config" << "tabs", tab1 + sep + tab2 + sep + clipboardTabName + sep);
     RUN("tab", tab1 + sep + tab2 + sep + clipboardTabName + sep);
+}
+
+void Tests::selectedItems()
+{
+    const auto tab1 = testTab(1);
+    const Args args = Args("tab") << tab1;
+
+    RUN("selectedTab", "CLIPBOARD\n");
+    RUN("selectedItems", "");
+
+    RUN(args << "add" << "D" << "C" << "B" << "A", "");
+    RUN(args << "setCurrentTab" << tab1 << "selectItems" << "1" << "2", "true\n");
+    RUN("selectedTab", tab1 + "\n");
+    RUN("selectedItems", "1\n2\n");
+    RUN("currentItem", "2\n");
+
+    const auto print = R"(
+        print([selectedTab(), "c:" + currentItem(), "s:" + selectedItems()]);
+        print("\\n")
+    )";
+
+    // Selection stays consistent when moving items
+    RUN(print << "move(0)" << print, tab1 + ",c:2,s:1,2\n" + tab1 + ",c:1,s:0,1\n");
+    RUN(print, tab1 + ",c:1,s:0,1\n");
+
+    RUN(print << "keys('HOME', 'CTRL+DOWN')" << print, tab1 + ",c:1,s:0,1\n" + tab1 + ",c:0,s:1,0\n");
+    RUN(print, tab1 + ",c:1,s:1\n");
+
+    // Selection stays consistent when removing items
+    RUN(args << "setCurrentTab" << tab1 << "selectItems" << "1" << "2" << "3", "true\n");
+    RUN(print << "remove(2)" << print, tab1 + ",c:3,s:1,2,3\n" + tab1 + ",c:2,s:1,-1,2\n");
+    RUN(print, tab1 + ",c:2,s:1,2\n");
+
+    // Renaming tab invalidates selection and all items because the tab
+    // underlying data needs to be loaded again using plugins.
+    const QString tab2 = testTab(2);
+    const auto rename = QString("renameTab('%1', '%2')").arg(tab1, tab2);
+    RUN(print << rename << print, tab1 + ",c:2,s:1,2\n" + tab1 + ",c:-1,s:-1,-1\n");
+
+    RUN(print, tab2 + ",c:0,s:0\n");
 }
 
 void Tests::shortcutCommand()
@@ -3733,7 +3848,7 @@ void Tests::automaticCommandRegExp()
 {
     const auto script = R"(
         setCommands([
-            { automatic: true, re: 'SHOULD BE CHANGED$', cmd: 'copyq: setData("text/plain", "CHANGED")' },
+            { automatic: true, re: 'SHOULD BE (CHANGED)$', cmd: 'copyq: setData(mimeText, arguments[1])' },
             { automatic: true, cmd: 'copyq: setData("DATA", "DONE")' },
         ])
         )";
@@ -4067,7 +4182,8 @@ void Tests::scriptOnItemsAdded()
                   global.onItemsAdded = function() {
                     sel = ItemSelection().current();
                     items = sel.items();
-                    items[0][mimeText] = "A:" + str(items[0][mimeText])
+                    for (i = 0; i < items.length; ++i)
+                        items[i][mimeText] = "A:" + str(items[i][mimeText])
                     sel.setItems(items);
                   }
                 `
